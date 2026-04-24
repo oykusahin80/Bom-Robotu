@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v5.4 - Fix Excel", layout="wide")
+st.set_page_config(page_title="BOM Robotu v5.5 - Price Fix", layout="wide")
 
 # --- TCMB CANLI KUR ÇEKME ---
 @st.cache_data(ttl=3600)
@@ -30,7 +30,40 @@ def get_tcmb_rates():
 
 RATES = get_tcmb_rates()
 
-# --- YARDIMCI FONKSİYONLAR ---
+def convert_any_to_usd(value):
+    """
+    Fiyatları kuruşu kuruşuna Dolara çevirir. 
+    Virgül/Nokta hatalarını engellemek için geliştirildi.
+    """
+    if pd.isna(value) or str(value).strip() == "": return None
+    
+    v_str = str(value).upper().replace(" ", "").replace("TL", "TRY")
+    
+    # Para birimi tespiti
+    currency = "TRY"
+    if "€" in v_str or "EUR" in v_str: currency = "EUR"
+    elif "$" in v_str or "USD" in v_str: currency = "USD"
+    
+    # Sadece rakam, virgül ve noktayı tut
+    v = re.sub(r'[^0-9,.]', '', v_str)
+    
+    # Sayı formatı düzeltme (Örn: 1.250,50 -> 1250.50 veya 0,0245 -> 0.0245)
+    if ',' in v and '.' in v:
+        # Hem nokta hem virgül varsa, nokta binliktir, virgül ondalıktır (TR formatı)
+        v = v.replace('.', '').replace(',', '.')
+    elif ',' in v:
+        # Sadece virgül varsa ondalıktır
+        v = v.replace(',', '.')
+        
+    try:
+        num = float(v)
+        if currency == "EUR": return round(num * RATES['EUR_TO_USD'], 6)
+        if currency == "TRY": return round(num * RATES['TRY_TO_USD'], 6)
+        return round(num, 6) # USD
+    except:
+        return None
+
+# --- DİĞER FONKSİYONLAR (AYNI KALDI) ---
 PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n', 'vendor material']
 PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'resale', 'net']
 QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
@@ -38,22 +71,6 @@ QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
 def aggressive_clean(text):
     if pd.isna(text) or text == "": return ""
     return re.sub(r'[^A-Z0-9]', '', str(text).upper().strip())
-
-def convert_any_to_usd(value):
-    if pd.isna(value) or str(value).strip() == "": return None
-    v_str = str(value).upper().replace(" ", "").replace("TL", "TRY")
-    currency = "TRY"
-    if "€" in v_str or "EUR" in v_str: currency = "EUR"
-    elif "$" in v_str or "USD" in v_str: currency = "USD"
-    v = re.sub(r'[^\d.,]', '', v_str)
-    if ',' in v and '.' in v: v = v.replace('.', '').replace(',', '.')
-    elif ',' in v: v = v.replace(',', '.')
-    try:
-        num = float(v)
-        if currency == "EUR": return round(num * RATES['EUR_TO_USD'], 4)
-        if currency == "TRY": return round(num * RATES['TRY_TO_USD'], 4)
-        return round(num, 4)
-    except: return None
 
 def find_best_column(columns, priority_list):
     for kw in priority_list:
@@ -82,8 +99,8 @@ def smart_load(file):
                 return df_pdf.iloc[1:].reset_index(drop=True)
     except: return None
 
-# --- ARAYÜZ ---
-st.title("📊 Profesyonel BOM Analiz Sistemi v5.4")
+# --- ARAYÜZ VE HESAPLAMA ---
+st.title("📊 BOM Robotu v5.5 - Fiyat Doğrulama Modu")
 
 master_file = st.file_uploader("1. Master BOM Listesi", type=['xlsx', 'xls'])
 supplier_files = st.file_uploader("2. Tedarikçi Teklifleri", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
@@ -115,39 +132,18 @@ if master_file and supplier_files:
                         usd_cols.append(u_col)
 
             if usd_cols:
-                # Hesaplamalar
                 final_df['En Düşük Birim ($)'] = final_df[usd_cols].min(axis=1)
-                
-                def get_winner(row):
-                    valid = row[usd_cols].dropna()
-                    if valid.empty: return "Teklif Yok"
-                    return valid.idxmin().replace("Fiyat_", "").replace(" ($)", "")
-                
-                final_df['Kazanan Tedarikçi'] = final_df.apply(get_winner, axis=1)
+                final_df['Kazanan'] = final_df[usd_cols].idxmin(axis=1).fillna("Yok").str.replace("Fiyat_", "").str.replace(" ($)", "")
 
                 if m_qty_col:
                     final_df[m_qty_col] = pd.to_numeric(final_df[m_qty_col], errors='coerce').fillna(0)
-                    final_df['Toplam Maliyet ($)'] = (final_df['En Düşük Birim ($)'] * final_df[m_qty_col]).round(2)
+                    final_df['Toplam ($)'] = (final_df['En Düşük Birim ($)'] * final_df[m_qty_col]).round(4)
 
-                # Tablo Görünümü
                 display_df = final_df.drop(columns=['MATCH_KEY'])
-                st.subheader("✅ Analiz Tamamlandı")
                 st.dataframe(display_df, use_container_width=True)
 
-                # --- DOĞRU EXCEL ÇIKTISI (XLSX) ---
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    display_df.to_excel(writer, index=False, sheet_name='Fiyat Analizi')
-                    # Sütun genişliklerini otomatik ayarla
-                    worksheet = writer.sheets['Fiyat Analizi']
-                    for i, col in enumerate(display_df.columns):
-                        column_len = max(display_df[col].astype(str).str.len().max(), len(col)) + 2
-                        worksheet.set_column(i, i, column_len)
+                    display_df.to_excel(writer, index=False, sheet_name='Analiz')
                 
-                excel_data = output.getvalue()
-                st.download_button(
-                    label="📩 Analiz Raporunu Excel Olarak İndir",
-                    data=excel_data,
-                    file_name="BOM_Analiz_Raporu.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button("📩 Excel Olarak İndir", output.getvalue(), "Analiz_Raporu.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
