@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v6.7 - Akıllı Filtre", layout="wide")
+st.set_page_config(page_title="BOM Robotu v6.8 - Dinamik Yükleme", layout="wide")
 
 # --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
@@ -38,7 +38,6 @@ st.sidebar.write(f"**USD / TL:** {L_RATES['USD_TRY']:.4f}")
 st.sidebar.write(f"**EUR / TL:** {L_RATES['EUR_TRY']:.4f}")
 st.sidebar.write(f"**EUR / USD:** {L_RATES['EUR_USD']:.4f}")
 st.sidebar.divider()
-st.sidebar.caption("Kurlar saatlik olarak güncellenir.")
 
 # --- 2. TEMİZLEME VE HESAPLAMA ---
 def aggressive_clean(text):
@@ -74,6 +73,9 @@ def find_best_col(columns, priority_list):
     return None
 
 def smart_load(file):
+    if file is None: return None
+    # Dosya her okunduğunda başına dönüyoruz (yeni yükleme çakışmasını önler)
+    file.seek(0)
     ext = os.path.splitext(file.name)[1].lower()
     try:
         if ext in ['.xlsx', '.xls']:
@@ -81,6 +83,7 @@ def smart_load(file):
             for i, row in df.head(50).iterrows():
                 row_str = " ".join(map(str, row.values)).lower()
                 if any(kw in row_str for kw in PN_PRIORITY):
+                    file.seek(0)
                     return pd.read_excel(file, header=i)
             return pd.read_excel(file)
         elif ext == '.pdf':
@@ -96,42 +99,42 @@ def smart_load(file):
                         df_pdf.columns = df_pdf.iloc[i]
                         return df_pdf.iloc[i+1:].reset_index(drop=True)
                 return df_pdf
-    except: return None
+    except Exception as e:
+        st.error(f"Dosya okuma hatası ({file.name}): {e}")
+    return None
 
 # --- 4. ANA AKIŞ ---
-st.title("📊 Profesyonel BOM Robotu v6.7")
+st.title("📊 Profesyonel BOM Robotu v6.8")
 
-master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'])
-supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
+# Master BOM tekli yükleme
+master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'], key="master_uploader")
+
+# Teklifler çoklu yükleme (key ekleyerek state yönetimini güçlendirdik)
+supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin (Toplu)", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True, key="supplier_uploader")
 
 if master_file and supplier_files:
+    # Her dosya değiştiğinde yeniden yüklemeyi tetikleyen ana döngü
     df_master = smart_load(master_file)
+    
     if df_master is not None:
         m_pn = find_best_col(df_master.columns, PN_PRIORITY)
         m_qty = find_best_col(df_master.columns, QTY_PRIORITY)
         m_no = find_best_col(df_master.columns, NO_PRIORITY)
         
-        # --- KRİTİK FİLTRELEME MANTIĞI ---
-        # Eğer 'NO' sütunu varsa ve boşsa VEYA Üretici Kodu boşsa o satırı atla
         if m_pn:
-            initial_count = len(df_master)
-            # Hem NO sütunu (eğer varsa) hem de PN sütunu üzerinden kontrol yapıyoruz
+            # Filtreleme
             if m_no:
                 df_master = df_master.dropna(subset=[m_no, m_pn], how='all')
             else:
                 df_master = df_master.dropna(subset=[m_pn])
             
-            # Ek olarak temiz PN kontrolü (Boş stringleri de siler)
             df_master = df_master[df_master[m_pn].apply(lambda x: str(x).strip() != "" and pd.notna(x))]
-            
-            cleaned_count = initial_count - len(df_master)
-            if cleaned_count > 0:
-                st.caption(f"ℹ️ {cleaned_count} adet boş veya geçersiz satır temizlendi.")
-
             df_master['MATCH_KEY'] = df_master[m_pn].apply(aggressive_clean)
+            
             final_df = df_master.copy()
             price_cols = []
 
+            # Yüklenen her bir tedarikçi dosyası için işle
             for s_file in supplier_files:
                 df_sup = smart_load(s_file)
                 if df_sup is not None:
@@ -150,7 +153,8 @@ if master_file and supplier_files:
                         temp_sup = temp_sup.dropna(subset=[p_col]).drop_duplicates('MATCH_KEY')
                         final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', p_col]], on='MATCH_KEY', how='left')
                         price_cols.append(p_col)
-                        st.success(f"✔️ {s_file.name} eklendi.")
+                    else:
+                        st.warning(f"⚠️ {s_file.name} içinde PN veya Fiyat bulunamadı.")
 
             if price_cols:
                 def get_row_results(row):
@@ -160,24 +164,18 @@ if master_file and supplier_files:
 
                 final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_row_results, axis=1)
                 
-                # İstatistikler
+                # Özet Panel
                 total_items = len(final_df)
                 found_items = final_df['En Düşük ($)'].notna().sum()
-                success_rate = (found_items / total_items) * 100 if total_items > 0 else 0
-                
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Toplam Kalem", total_items)
-                c2.metric("Teklif Bulunan", found_items)
-                c3.metric("Başarı Oranı", f"%{success_rate:.1f}")
+                st.info(f"📁 Toplam {len(supplier_files)} dosya işlendi. {total_items} kalemden {found_items} tanesine fiyat bulundu.")
 
                 if m_qty:
                     final_df[m_qty] = pd.to_numeric(final_df[m_qty], errors='coerce').fillna(0)
                     final_df['Toplam Maliyet ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty]).round(4)
 
-                st.subheader("🏁 Karşılaştırma Tablosu")
                 st.dataframe(final_df.drop(columns=['MATCH_KEY']).style.format(precision=4, na_rep="-"), use_container_width=True)
                 
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     final_df.drop(columns=['MATCH_KEY']).to_excel(writer, index=False)
-                st.download_button("📩 Excel Raporunu İndir", out.getvalue(), "BOM_Analiz_Raporu.xlsx")
+                st.download_button("📩 Güncel Raporu İndir", out.getvalue(), "BOM_Analiz_Raporu.xlsx")
