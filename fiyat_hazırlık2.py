@@ -7,13 +7,12 @@ import requests
 import xml.etree.ElementTree as ET
 import plotly.express as px
 
-st.set_page_config(page_title="BOM Robotu v5.2", layout="wide")
+st.set_page_config(page_title="BOM Robotu v5.3 - Pure USD", layout="wide")
 
 # --- TCMB CANLI KUR ÇEKME ---
 @st.cache_data(ttl=3600)
 def get_tcmb_rates():
     try:
-        # Zaman aşımı ekleyerek TCMB sitesinin yavaşlığına karşı önlem alıyoruz
         response = requests.get("https://www.tcmb.gov.tr/kurlar/today.xml", timeout=10)
         root = ET.fromstring(response.content)
         rates = {'USD': 1.0, 'TRY': 1.0, 'EUR': 1.0}
@@ -23,13 +22,11 @@ def get_tcmb_rates():
                 val = currency.find('ForexSelling').text
                 if val: rates[code] = float(val)
         
-        # USD bazlı dönüşüm katsayıları
         u_rate = rates.get('USD', 32.5) 
         rates['TRY_TO_USD'] = 1 / u_rate
         rates['EUR_TO_USD'] = rates['EUR'] / u_rate
         return rates
-    except Exception as e:
-        st.warning(f"⚠️ Kur çekilemedi, sabit kurlar kullanılıyor: {e}")
+    except:
         return {'TRY_TO_USD': 1/32.5, 'EUR_TO_USD': 1.08}
 
 RATES = get_tcmb_rates()
@@ -43,8 +40,9 @@ def aggressive_clean(text):
     if pd.isna(text) or text == "": return ""
     return re.sub(r'[^A-Z0-9]', '', str(text).upper().strip())
 
-def detect_and_convert_to_usd(value):
-    if pd.isna(value) or str(value).strip() == "": return None, ""
+def convert_any_to_usd(value):
+    """Her şeyi dolara çevirir, sadece rakam döndürür"""
+    if pd.isna(value) or str(value).strip() == "": return None
     v_str = str(value).upper().replace(" ", "").replace("TL", "TRY")
     
     currency = "TRY"
@@ -57,10 +55,10 @@ def detect_and_convert_to_usd(value):
     
     try:
         num = float(v)
-        if currency == "EUR": return round(num * RATES['EUR_TO_USD'], 4), " (€)"
-        if currency == "TRY": return round(num * RATES['TRY_TO_USD'], 4), " (TL)"
-        return round(num, 4), " ($)"
-    except: return None, ""
+        if currency == "EUR": return round(num * RATES['EUR_TO_USD'], 4)
+        if currency == "TRY": return round(num * RATES['TRY_TO_USD'], 4)
+        return round(num, 4) # Zaten USD
+    except: return None
 
 def find_best_column(columns, priority_list):
     for kw in priority_list:
@@ -90,8 +88,8 @@ def smart_load(file):
     except: return None
 
 # --- ARAYÜZ ---
-st.title("🚀 Akıllı BOM Karşılaştırma v5.2")
-st.sidebar.info(f"🏦 TCMB Kurları:\n- 1 EUR: {RATES['EUR_TO_USD']:.4f} USD\n- 1 TRY: {RATES['TRY_TO_USD']:.4f} USD")
+st.title("💵 Dolar Bazlı BOM Analiz Robotu")
+st.sidebar.info(f"🏦 TCMB Kurları (USD Bazlı):\n- 1 EUR = {RATES['EUR_TO_USD']:.4f} $\n- 1 TL = {RATES['TRY_TO_USD']:.4f} $")
 
 master_file = st.file_uploader("1. Master BOM Listesi", type=['xlsx', 'xls'])
 supplier_files = st.file_uploader("2. Tedarikçi Teklifleri", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
@@ -114,45 +112,45 @@ if master_file and supplier_files:
                     s_pr = find_best_column(df_sup.columns, PRICE_PRIORITY)
                     
                     if s_pn and s_pr:
-                        s_name = os.path.splitext(s_file.name)[0][:15] # İsmi kısalt
-                        u_col = f"{s_name}_USD"
-                        o_col = f"{s_name}_Orijinal"
+                        s_name = os.path.splitext(s_file.name)[0][:15]
+                        u_col = f"{s_name} ($)"
                         
                         temp_sup = df_sup[[s_pn, s_pr]].copy()
                         temp_sup['MATCH_KEY'] = temp_sup[s_pn].apply(aggressive_clean)
-                        
-                        conv = temp_sup[s_pr].apply(detect_and_convert_to_usd)
-                        temp_sup[u_col] = conv.apply(lambda x: x[0])
-                        temp_sup[o_col] = temp_sup[s_pr].astype(str) + conv.apply(lambda x: x[1])
+                        temp_sup[u_col] = temp_sup[s_pr].apply(convert_any_to_usd)
                         
                         temp_sup = temp_sup.dropna(subset=[u_col]).drop_duplicates('MATCH_KEY')
-                        final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', u_col, o_col]], on='MATCH_KEY', how='left')
+                        final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', u_col]], on='MATCH_KEY', how='left')
                         usd_cols.append(u_col)
 
-            # --- HATA KORUMALI HESAPLAMA ---
             if usd_cols:
-                # Satır bazlı en düşük fiyatı bulurken boş satırları (NaN) yoksay
-                final_df['En Düşük ($)'] = final_df[usd_cols].min(axis=1)
+                # En düşük fiyat
+                final_df['En Ucuz ($)'] = final_df[usd_cols].min(axis=1)
                 
-                # Kazananı belirle (Hata veren yer burasıydı, idxmin güvenli hale getirildi)
+                # Kazanan belirleme
                 def get_winner(row):
-                    valid_prices = row[usd_cols].dropna()
-                    if valid_prices.empty: return "Teklif Yok"
-                    return valid_prices.idxmin().replace("_USD", "")
+                    valid = row[usd_cols].dropna()
+                    if valid.empty: return "Teklif Yok"
+                    return valid.idxmin().replace(" ($)", "")
                 
                 final_df['Kazanan'] = final_df.apply(get_winner, axis=1)
 
+                # Adet hesabı
                 if m_qty_col:
                     final_df[m_qty_col] = pd.to_numeric(final_df[m_qty_col], errors='coerce').fillna(0)
-                    final_df['Toplam ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty_col]).round(2)
+                    final_df['Toplam ($)'] = (final_df['En Ucuz ($)'] * final_df[m_qty_col]).round(2)
 
-                # --- ÖZET VE TABLO ---
-                st.subheader("📊 Analiz Özeti")
+                # Grafik ve Tablo
+                st.subheader("📊 Karşılaştırma Sonucu (Tüm Fiyatlar USD)")
+                
                 wins = final_df[final_df['Kazanan'] != "Teklif Yok"]['Kazanan'].value_counts()
                 if not wins.empty:
-                    st.plotly_chart(px.pie(values=wins.values, names=wins.index, title="Tedarikçi Payları", hole=0.4))
+                    st.plotly_chart(px.pie(values=wins.values, names=wins.index, title="Hangi Tedarikçi Daha Ucuz?", hole=0.4))
                 
-                st.dataframe(final_df.drop(columns=['MATCH_KEY'] + usd_cols), use_container_width=True)
-                st.download_button("📩 Raporu İndir", final_df.to_csv(index=False).encode('utf-8-sig'), "BOM_Analiz.csv")
+                # Tabloyu gösterirken MATCH_KEY'i gizle
+                st.dataframe(final_df.drop(columns=['MATCH_KEY']), use_container_width=True)
+                
+                csv = final_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📩 Dolar Bazlı Raporu İndir", csv, "BOM_USD_Analiz.csv")
         else:
-            st.error("Master Listede PN Sütunu Bulunamadı!")
+            st.error("Master Listede Parça Numarası (PN) sütunu bulunamadı!")
