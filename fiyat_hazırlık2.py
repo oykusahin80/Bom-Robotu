@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v7.6 - Tam Stok Entegrasyonu", layout="wide")
+st.set_page_config(page_title="BOM Robotu v7.7 - Final Fix", layout="wide")
 
 # --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
@@ -104,7 +104,7 @@ def smart_load(file):
     except: return None
 
 # --- 4. ANA AKIŞ ---
-st.title("📊 Profesyonel BOM Robotu v7.6 (Tam Stok ve Fiyat Raporu)")
+st.title("📊 Profesyonel BOM Robotu v7.7")
 
 m_file = st.file_uploader("1. Master BOM", type=['xlsx', 'xls'], key="m_up")
 s_files = st.file_uploader("2. Teklifler", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True, key="s_up")
@@ -116,12 +116,12 @@ if m_file and s_files:
         m_qty = find_best_col(df_m.columns, QTY_PRIORITY)
         
         if m_pn:
-            df_m = df_m.dropna(subset=[m_pn])
+            # KRİTİK: Index sıfırlama (Hatanın çözümü)
+            df_m = df_m.dropna(subset=[m_pn]).reset_index(drop=True)
             df_m['MATCH_KEY'] = df_m[m_pn].apply(aggressive_clean)
             final_df = df_m.copy()
             
             price_cols = []
-            stock_data_map = {} # Fiyat -> Stok eşleşmesi için
 
             for f in s_files:
                 df_s = smart_load(f)
@@ -142,9 +142,7 @@ if m_file and s_files:
                         
                         merged = pd.merge(final_df[['MATCH_KEY']], temp[['MATCH_KEY', 'P_USD', 'S_VAL']], on='MATCH_KEY', how='left')
                         
-                        # Ekranda gösterilecek format: "0.1234 [S: 500]"
                         final_df[p_col] = merged.apply(lambda r: f"{r['P_USD']:.4f} [S: {int(r['S_VAL'])}]" if pd.notna(r['P_USD']) else None, axis=1)
-                        # Arka planda matematiksel işlemler için ham verileri tut
                         final_df[f"{p_col}_raw"] = merged['P_USD']
                         final_df[st_col] = merged['S_VAL']
                         
@@ -152,59 +150,56 @@ if m_file and s_files:
                         st.success(f"✔️ {f.name} okundu.")
 
             if price_cols:
-                # İhtiyaca göre seçim yapma
                 def get_best_offer(row):
                     valid = []
                     target_qty = pd.to_numeric(row[m_qty], errors='coerce') if m_qty else 0
-                    
-                    for p_col in price_cols:
-                        raw_p = row[f"{p_col}_raw"]
-                        st_val = row[f"{p_col.replace('_($)', '_Stok')}"]
-                        # Seçim kuralı: Stok > 0 (Tercihen Stok >= İhtiyaç)
-                        if pd.notna(raw_p) and st_val > 0:
-                            valid.append((raw_p, p_col.replace("_($)", ""), st_val))
-                    
+                    for pc in price_cols:
+                        raw_p = row[f"{pc}_raw"]
+                        st_v = row[pc.replace('_($)', '_Stok')]
+                        if pd.notna(raw_p) and st_v > 0:
+                            valid.append((raw_p, pc.replace("_($)", ""), st_v))
                     if not valid: return pd.Series([None, "Yok"], index=['Min', 'Win'])
-                    
-                    # Önce stoğu yetenler arasından en ucuz, yoksa mevcutlar arasından en ucuz
                     suff = [v for v in valid if v[2] >= target_qty]
-                    final_list = suff if suff else valid
-                    best = min(final_list, key=lambda x: x[0])
+                    best = min(suff if suff else valid, key=lambda x: x[0])
                     return pd.Series([best[0], best[1]], index=['Min', 'Win'])
 
                 final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_best_offer, axis=1)
-
-                # --- RENKLENDİRME ---
-                def style_output(df_styled):
-                    for p_col in price_cols:
-                        st_col = p_col.replace("_($)", "_Stok")
-                        target_qty = pd.to_numeric(final_df[m_qty], errors='coerce') if m_qty else 0
-                        
-                        # Stok < İhtiyaç ise kırmızı yap
-                        mask = (final_df[st_col] < target_qty) & (final_df[f"{p_col}_raw"].notna())
-                        df_styled = df_styled.apply(lambda x: [
-                            'background-color: #ff4b4b; color: white' if mask[i] else '' 
-                            for i in range(len(x))
-                        ] if x.name == p_col else ['']*len(x), axis=0)
-                    return df_styled
 
                 # Yan Panel Özeti
                 st.sidebar.title("📊 Analiz Özeti")
                 st.sidebar.info(f"**Toplam Kalem:** {len(final_df)}")
                 st.sidebar.success(f"**Bulunan:** {final_df['En Düşük ($)'].notna().sum()}")
 
-                # Toplam Maliyet
                 if m_qty:
                     final_df[m_qty] = pd.to_numeric(final_df[m_qty], errors='coerce').fillna(0)
                     final_df['Toplam Maliyet ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty]).round(4)
 
+                # --- RENKLENDİRME (Hatasız Versiyon) ---
+                def style_logic(col_data):
+                    col_name = col_data.name
+                    if col_name in price_cols:
+                        st_col = col_name.replace("_($)", "_Stok")
+                        target_qty = pd.to_numeric(final_df[m_qty], errors='coerce') if m_qty else 0
+                        
+                        styles = []
+                        for i in range(len(col_data)):
+                            curr_stok = final_df.loc[i, st_col]
+                            curr_price = final_df.loc[i, f"{col_name}_raw"]
+                            # Eğer fiyat varsa VE stok ihtiyacın altındaysa kırmızı yap
+                            if pd.notna(curr_price) and curr_stok < target_qty.iloc[i]:
+                                styles.append('background-color: #ff4b4b; color: white')
+                            else:
+                                styles.append('')
+                        return styles
+                    return [''] * len(col_data)
+
                 st.subheader("🏁 Karşılaştırma Sonuçları")
                 display_cols = [c for c in final_df.columns if "_raw" not in str(c) and "MATCH_KEY" not in str(c)]
-                st.dataframe(final_df[display_cols].style.pipe(style_output), use_container_width=True)
                 
-                # Excel İndir (Tüm sütunlarla: Fiyat ve Stok ayrı ayrı)
-                excel_out = final_df[display_cols]
+                # Tabloyu göster
+                st.dataframe(final_df[display_cols].style.apply(style_logic), use_container_width=True)
+                
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
-                    excel_out.to_excel(writer, index=False)
-                st.download_button("📩 Detaylı Excel Raporu", out.getvalue(), "BOM_Detayli_Analiz.xlsx")
+                    final_df[display_cols].to_excel(writer, index=False)
+                st.download_button("📩 Excel Raporu", out.getvalue(), "BOM_Analiz.xlsx")
