@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v5.5 - Price Fix", layout="wide")
+st.set_page_config(page_title="BOM Robotu v5.6 - Final Fix", layout="wide")
 
 # --- TCMB CANLI KUR ÇEKME ---
 @st.cache_data(ttl=3600)
@@ -31,15 +31,10 @@ def get_tcmb_rates():
 RATES = get_tcmb_rates()
 
 def convert_any_to_usd(value):
-    """
-    Fiyatları kuruşu kuruşuna Dolara çevirir. 
-    Virgül/Nokta hatalarını engellemek için geliştirildi.
-    """
     if pd.isna(value) or str(value).strip() == "": return None
     
+    # Metni temizle ve para birimini yakala
     v_str = str(value).upper().replace(" ", "").replace("TL", "TRY")
-    
-    # Para birimi tespiti
     currency = "TRY"
     if "€" in v_str or "EUR" in v_str: currency = "EUR"
     elif "$" in v_str or "USD" in v_str: currency = "USD"
@@ -47,23 +42,24 @@ def convert_any_to_usd(value):
     # Sadece rakam, virgül ve noktayı tut
     v = re.sub(r'[^0-9,.]', '', v_str)
     
-    # Sayı formatı düzeltme (Örn: 1.250,50 -> 1250.50 veya 0,0245 -> 0.0245)
+    # --- ONDALIK AYIRAÇ DÜZELTME (KRİTİK) ---
     if ',' in v and '.' in v:
-        # Hem nokta hem virgül varsa, nokta binliktir, virgül ondalıktır (TR formatı)
+        # Örn: 1.250,50 -> Nokta silinir, virgül noktaya döner
         v = v.replace('.', '').replace(',', '.')
     elif ',' in v:
-        # Sadece virgül varsa ondalıktır
+        # Örn: 0,0245 -> Virgül noktaya döner
         v = v.replace(',', '.')
-        
+    
     try:
         num = float(v)
+        # Hassas çarpım (6 hane)
         if currency == "EUR": return round(num * RATES['EUR_TO_USD'], 6)
         if currency == "TRY": return round(num * RATES['TRY_TO_USD'], 6)
-        return round(num, 6) # USD
+        return round(num, 6)
     except:
         return None
 
-# --- DİĞER FONKSİYONLAR (AYNI KALDI) ---
+# --- DİĞER YARDIMCI FONKSİYONLAR ---
 PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n', 'vendor material']
 PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'resale', 'net']
 QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
@@ -99,8 +95,8 @@ def smart_load(file):
                 return df_pdf.iloc[1:].reset_index(drop=True)
     except: return None
 
-# --- ARAYÜZ VE HESAPLAMA ---
-st.title("📊 BOM Robotu v5.5 - Fiyat Doğrulama Modu")
+# --- ARAYÜZ VE ANALİZ ---
+st.title("📊 Profesyonel BOM Robotu v5.6")
 
 master_file = st.file_uploader("1. Master BOM Listesi", type=['xlsx', 'xls'])
 supplier_files = st.file_uploader("2. Tedarikçi Teklifleri", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
@@ -132,13 +128,24 @@ if master_file and supplier_files:
                         usd_cols.append(u_col)
 
             if usd_cols:
+                # --- ÇÖKMEYİ ENGELLEYEN HESAPLAMA MANTIĞI ---
                 final_df['En Düşük Birim ($)'] = final_df[usd_cols].min(axis=1)
-                final_df['Kazanan'] = final_df[usd_cols].idxmin(axis=1).fillna("Yok").str.replace("Fiyat_", "").str.replace(" ($)", "")
+
+                def get_winner_safe(row):
+                    valid_prices = row[usd_cols].dropna()
+                    if valid_prices.empty:
+                        return "Teklif Yok"
+                    # En küçük değerin sütun ismini bul ve temizle
+                    winner_col = valid_prices.idxmin()
+                    return str(winner_col).replace("Fiyat_", "").replace(" ($)", "")
+
+                final_df['Kazanan'] = final_df.apply(get_winner_safe, axis=1)
 
                 if m_qty_col:
                     final_df[m_qty_col] = pd.to_numeric(final_df[m_qty_col], errors='coerce').fillna(0)
                     final_df['Toplam ($)'] = (final_df['En Düşük Birim ($)'] * final_df[m_qty_col]).round(4)
 
+                # Tablo ve İndirme
                 display_df = final_df.drop(columns=['MATCH_KEY'])
                 st.dataframe(display_df, use_container_width=True)
 
@@ -146,4 +153,6 @@ if master_file and supplier_files:
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     display_df.to_excel(writer, index=False, sheet_name='Analiz')
                 
-                st.download_button("📩 Excel Olarak İndir", output.getvalue(), "Analiz_Raporu.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button("📩 Excel Raporunu İndir", output.getvalue(), "Analiz_Raporu.xlsx")
+        else:
+            st.error("Master listede parça numarası sütunu bulunamadı.")
