@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v7.7 - Final Fix", layout="wide")
+st.set_page_config(page_title="BOM Robotu v7.8 - Arrow & Stok Fix", layout="wide")
 
 # --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
@@ -31,13 +31,6 @@ def get_live_rates():
 
 L_RATES = get_live_rates()
 
-# --- SIDEBAR ---
-st.sidebar.title("🏦 Güncel Kurlar (TCMB)")
-st.sidebar.write(f"**USD / TL:** {L_RATES['USD']:.4f}")
-st.sidebar.write(f"**EUR / TL:** {L_RATES['EUR']:.4f}")
-st.sidebar.write(f"**EUR / USD:** {L_RATES['EUR_USD']:.4f}")
-st.sidebar.divider()
-
 # --- 2. YARDIMCI FONKSİYONLAR ---
 def aggressive_clean(text):
     if pd.isna(text) or str(text).strip() == "": return ""
@@ -46,6 +39,7 @@ def aggressive_clean(text):
 def parse_to_usd(val, is_arrow=False):
     if pd.isna(val) or str(val).strip() == "": return None
     v = str(val).upper().replace(" ", "")
+    # Rakamları ayıkla
     c = re.sub(r'[^0-9,.]', '', v)
     if ',' in c and '.' in c: c = c.replace('.', '').replace(',', '.')
     elif ',' in c: c = c.replace(',', '.')
@@ -58,17 +52,18 @@ def parse_to_usd(val, is_arrow=False):
 
 def clean_stock(val):
     if pd.isna(val) or str(val).strip() == "": return 999999
-    s = str(val).upper()
-    if any(x in s for x in ['YOK', 'OUT', 'NO', 'ZERO']): return 0
+    s = str(val).upper().replace(",", "").replace(".", "")
+    if any(x in s for x in ['YOK', 'OUT', 'NO', 'ZERO', 'NONE']): return 0
+    # Sadece sayıları al
     c = re.sub(r'[^0-9]', '', s)
     try: return int(c) if c else 999999
     except: return 999999
 
-# --- 3. SÜTUN TANIMA ---
-PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n']
-PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar']
-QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
-STOCK_PRIORITY = ['stock', 'stok', 'qty available', 'on hand', 'mevcut']
+# --- 3. GENİŞLETİLMİŞ SÜTUN TANIMA ---
+PN_PRIO = ['manufacturer part number', 'mfr part', 'part number', 'pn', 'kod', 'model', 'p/n', 'mfr p/n', 'üretici kodu']
+PR_PRIO = ['unit price', 'fiyat', 'price', 'tutar', 'resale', 'net price', 'amount']
+ST_PRIO = ['stock', 'stok', 'qty available', 'on hand', 'mevcut', 'avail', 'quantity available']
+QTY_PRIO = ['qty', 'adet', 'miktar', 'quantity']
 
 def find_best_col(columns, priority_list):
     for kw in priority_list:
@@ -82,9 +77,11 @@ def smart_load(file):
     ext = os.path.splitext(file.name)[1].lower()
     try:
         if ext in ['.xlsx', '.xls']:
-            df = pd.read_excel(file, header=None)
-            for i, row in df.head(50).iterrows():
-                if any(kw in " ".join(map(str, row.values)).lower() for kw in PN_PRIORITY):
+            # Başlık satırını bulmak için derin tarama
+            df_raw = pd.read_excel(file, header=None)
+            for i, row in df_raw.head(100).iterrows():
+                row_str = " ".join(map(str, row.values)).lower()
+                if any(kw in row_str for kw in PN_PRIO):
                     file.seek(0)
                     return pd.read_excel(file, header=i)
             return pd.read_excel(file)
@@ -96,15 +93,15 @@ def smart_load(file):
                     if table: all_rows.extend(table)
             if all_rows:
                 df_p = pd.DataFrame(all_rows)
-                for i, row in df_p.head(20).iterrows():
-                    if any(kw in " ".join(map(str, row.values)).lower() for kw in PN_PRIORITY):
+                for i, row in df_p.head(50).iterrows():
+                    if any(kw in " ".join(map(str, row.values)).lower() for kw in PN_PRIO):
                         df_p.columns = df_p.iloc[i]
                         return df_p.iloc[i+1:].reset_index(drop=True)
                 return df_p
     except: return None
 
 # --- 4. ANA AKIŞ ---
-st.title("📊 Profesyonel BOM Robotu v7.7")
+st.title("📊 Profesyonel BOM Robotu v7.8")
 
 m_file = st.file_uploader("1. Master BOM", type=['xlsx', 'xls'], key="m_up")
 s_files = st.file_uploader("2. Teklifler", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True, key="s_up")
@@ -112,42 +109,46 @@ s_files = st.file_uploader("2. Teklifler", type=['xlsx', 'xls', 'pdf'], accept_m
 if m_file and s_files:
     df_m = smart_load(m_file)
     if df_m is not None:
-        m_pn = find_best_col(df_m.columns, PN_PRIORITY)
-        m_qty = find_best_col(df_m.columns, QTY_PRIORITY)
+        m_pn = find_best_col(df_m.columns, PN_PRIO)
+        m_qty = find_best_col(df_m.columns, QTY_PRIO)
         
         if m_pn:
-            # KRİTİK: Index sıfırlama (Hatanın çözümü)
             df_m = df_m.dropna(subset=[m_pn]).reset_index(drop=True)
             df_m['MATCH_KEY'] = df_m[m_pn].apply(aggressive_clean)
             final_df = df_m.copy()
             
             price_cols = []
-
+            
             for f in s_files:
                 df_s = smart_load(f)
                 if df_s is not None:
-                    s_pn = find_best_col(df_s.columns, PN_PRIORITY)
-                    s_pr = find_best_col(df_s.columns, PRICE_PRIORITY)
-                    s_st = find_best_col(df_s.columns, STOCK_PRIORITY)
+                    s_pn = find_best_col(df_s.columns, PN_PRIO)
+                    s_pr = find_best_col(df_s.columns, PR_PRIO)
+                    s_st = find_best_col(df_s.columns, ST_PRIO)
                     
                     if s_pn and s_pr:
                         s_name = os.path.splitext(f.name)[0][:10]
                         p_col = f"{s_name}_($)"
                         st_col = f"{s_name}_Stok"
+                        is_arrow = "ARROW" in f.name.upper()
                         
                         temp = df_s.copy()
                         temp['MATCH_KEY'] = temp[s_pn].apply(aggressive_clean)
-                        temp['P_USD'] = temp[s_pr].apply(lambda x: parse_to_usd(x, "ARROW" in f.name.upper()))
+                        temp['P_USD'] = temp[s_pr].apply(lambda x: parse_to_usd(x, is_arrow))
                         temp['S_VAL'] = temp[s_st].apply(clean_stock) if s_st else 999999
                         
                         merged = pd.merge(final_df[['MATCH_KEY']], temp[['MATCH_KEY', 'P_USD', 'S_VAL']], on='MATCH_KEY', how='left')
                         
+                        # Ekranda gösterim formatı
                         final_df[p_col] = merged.apply(lambda r: f"{r['P_USD']:.4f} [S: {int(r['S_VAL'])}]" if pd.notna(r['P_USD']) else None, axis=1)
+                        # Hesaplama için ham veriler
                         final_df[f"{p_col}_raw"] = merged['P_USD']
                         final_df[st_col] = merged['S_VAL']
                         
                         price_cols.append(p_col)
-                        st.success(f"✔️ {f.name} okundu.")
+                        st.success(f"✔️ {f.name} başarıyla işlendi.")
+                    else:
+                        st.warning(f"⚠️ {f.name} dosyasında PN veya Fiyat sütunu bulunamadı!")
 
             if price_cols:
                 def get_best_offer(row):
@@ -158,7 +159,9 @@ if m_file and s_files:
                         st_v = row[pc.replace('_($)', '_Stok')]
                         if pd.notna(raw_p) and st_v > 0:
                             valid.append((raw_p, pc.replace("_($)", ""), st_v))
+                    
                     if not valid: return pd.Series([None, "Yok"], index=['Min', 'Win'])
+                    # Stok yetenler öncelikli
                     suff = [v for v in valid if v[2] >= target_qty]
                     best = min(suff if suff else valid, key=lambda x: x[0])
                     return pd.Series([best[0], best[1]], index=['Min', 'Win'])
@@ -169,23 +172,25 @@ if m_file and s_files:
                 st.sidebar.title("📊 Analiz Özeti")
                 st.sidebar.info(f"**Toplam Kalem:** {len(final_df)}")
                 st.sidebar.success(f"**Bulunan:** {final_df['En Düşük ($)'].notna().sum()}")
+                
+                win_counts = final_df[final_df['Kazanan'] != "Yok"]['Kazanan'].value_counts()
+                for win, count in win_counts.items():
+                    st.sidebar.write(f"🔹 {win}: **{count} Kalem**")
 
                 if m_qty:
                     final_df[m_qty] = pd.to_numeric(final_df[m_qty], errors='coerce').fillna(0)
                     final_df['Toplam Maliyet ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty]).round(4)
 
-                # --- RENKLENDİRME (Hatasız Versiyon) ---
+                # --- RENKLENDİRME ---
                 def style_logic(col_data):
                     col_name = col_data.name
                     if col_name in price_cols:
                         st_col = col_name.replace("_($)", "_Stok")
                         target_qty = pd.to_numeric(final_df[m_qty], errors='coerce') if m_qty else 0
-                        
                         styles = []
                         for i in range(len(col_data)):
                             curr_stok = final_df.loc[i, st_col]
                             curr_price = final_df.loc[i, f"{col_name}_raw"]
-                            # Eğer fiyat varsa VE stok ihtiyacın altındaysa kırmızı yap
                             if pd.notna(curr_price) and curr_stok < target_qty.iloc[i]:
                                 styles.append('background-color: #ff4b4b; color: white')
                             else:
@@ -195,11 +200,9 @@ if m_file and s_files:
 
                 st.subheader("🏁 Karşılaştırma Sonuçları")
                 display_cols = [c for c in final_df.columns if "_raw" not in str(c) and "MATCH_KEY" not in str(c)]
-                
-                # Tabloyu göster
                 st.dataframe(final_df[display_cols].style.apply(style_logic), use_container_width=True)
                 
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     final_df[display_cols].to_excel(writer, index=False)
-                st.download_button("📩 Excel Raporu", out.getvalue(), "BOM_Analiz.xlsx")
+                st.download_button("📩 Detaylı Excel Raporu", out.getvalue(), "BOM_Analiz.xlsx")
