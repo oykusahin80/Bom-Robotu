@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v7.0 - Tedarikçi Dağılımı", layout="wide")
+st.set_page_config(page_title="BOM Robotu v7.2 - Yan Panel Özetli", layout="wide")
 
 # --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
@@ -32,13 +32,12 @@ def get_live_rates():
 
 L_RATES = get_live_rates()
 
-# --- SIDEBAR (KUR BİLGİLERİ) ---
+# --- SIDEBAR (KUR VE ANALİZ BİLGİLERİ) ---
 st.sidebar.title("🏦 Güncel Kurlar (TCMB)")
 st.sidebar.write(f"**USD / TL:** {L_RATES['USD_TRY']:.4f}")
 st.sidebar.write(f"**EUR / TL:** {L_RATES['EUR_TRY']:.4f}")
 st.sidebar.write(f"**EUR / USD:** {L_RATES['EUR_USD']:.4f}")
 st.sidebar.divider()
-st.sidebar.caption("Kurlar saatlik olarak güncellenir.")
 
 # --- 2. TEMİZLEME VE HESAPLAMA ---
 def aggressive_clean(text):
@@ -102,7 +101,7 @@ def smart_load(file):
     except: return None
 
 # --- 4. ANA AKIŞ ---
-st.title("📊 Profesyonel BOM Robotu v7.0")
+st.title("📊 Profesyonel BOM Robotu v7.2")
 
 master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'], key="m_up")
 supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin (Toplu)", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True, key="s_up")
@@ -116,7 +115,7 @@ if master_file and supplier_files:
         m_no = find_best_col(df_master.columns, NO_PRIORITY)
         
         if m_pn:
-            # Boş satırları filtrele (Önceki filtreleme mantığını koruyoruz)
+            # Boş satırları filtrele
             if m_no:
                 df_master = df_master.dropna(subset=[m_no, m_pn], how='all')
             else:
@@ -146,7 +145,7 @@ if master_file and supplier_files:
                         temp_sup = temp_sup.dropna(subset=[p_col]).drop_duplicates('MATCH_KEY')
                         final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', p_col]], on='MATCH_KEY', how='left')
                         price_cols.append(p_col)
-                        st.success(f"✔️ {s_file.name} başarıyla işlendi.")
+                        st.success(f"✔️ {s_file.name} işlendi.")
 
             if price_cols:
                 def get_row_results(row):
@@ -156,28 +155,22 @@ if master_file and supplier_files:
 
                 final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_row_results, axis=1)
                 
-                # --- ÖZET İSTATİSTİK PANELİ (GÜNCELLENDİ) ---
+                # --- YAN PANEL ANALİZ ÖZETİ (İSTEDİĞİNİZ YER) ---
                 total_items = len(final_df)
                 found_items = final_df['En Düşük ($)'].notna().sum()
                 success_rate = (found_items / total_items) * 100 if total_items > 0 else 0
                 
-                st.divider()
-                st.subheader("📋 Genel Özet")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Toplam Malzeme", f"{total_items} Kalem")
-                col2.metric("Teklif Bulunan", f"{found_items} Kalem")
-                col3.metric("Başarı Oranı", f"%{success_rate:.1f}")
+                st.sidebar.title("📊 Analiz Özeti")
+                st.sidebar.info(f"**Toplam:** {total_items} Kalem")
+                st.sidebar.success(f"**Bulunan:** {found_items} Kalem")
+                st.sidebar.warning(f"**Başarı:** %{success_rate:.1f}")
                 
-                # --- YENİ: TEDARİKÇİ DAĞILIMI (Firma bazlı sayılar) ---
                 win_counts = final_df[final_df['Kazanan'] != "Yok"]['Kazanan'].value_counts()
                 if not win_counts.empty:
-                    st.write("---")
-                    st.write("**Hangi Firmadan Kaç Malzeme Seçildi?**")
-                    # Tedarikçi sayısı kadar kolon oluştur
-                    sub_cols = st.columns(len(win_counts))
-                    for i, (winner, count) in enumerate(win_counts.items()):
-                        sub_cols[i].metric(winner, f"{count} Kalem")
-                st.divider()
+                    st.sidebar.divider()
+                    st.sidebar.write("**Tedarikçi Dağılımı:**")
+                    for winner, count in win_counts.items():
+                        st.sidebar.write(f"🔹 {winner}: **{count}**")
 
                 if m_qty:
                     final_df[m_qty] = pd.to_numeric(final_df[m_qty], errors='coerce').fillna(0)
@@ -189,4 +182,4 @@ if master_file and supplier_files:
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     final_df.drop(columns=['MATCH_KEY']).to_excel(writer, index=False)
-                st.download_button("📩 Güncel Excel Raporunu İndir", out.getvalue(), "BOM_Analiz_Raporu.xlsx")
+                st.download_button("📩 Raporu İndir (Excel)", out.getvalue(), "BOM_Analiz_Raporu.xlsx")
