@@ -7,9 +7,10 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v5.6 - Final Fix", layout="wide")
+# --- SAYFA AYARLARI ---
+st.set_page_config(page_title="BOM Robotu v5.7 - Kararlı Sürüm", layout="wide")
 
-# --- TCMB CANLI KUR ÇEKME ---
+# --- TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
 def get_tcmb_rates():
     try:
@@ -21,57 +22,54 @@ def get_tcmb_rates():
             if code in ['USD', 'EUR']:
                 val = currency.find('ForexSelling').text
                 if val: rates[code] = float(val)
+        
         u_rate = rates.get('USD', 32.5) 
-        rates['TRY_TO_USD'] = 1 / u_rate
-        rates['EUR_TO_USD'] = rates['EUR'] / u_rate
-        return rates
+        return {
+            'TRY_TO_USD': 1 / u_rate,
+            'EUR_TO_USD': rates['EUR'] / u_rate
+        }
     except:
         return {'TRY_TO_USD': 1/32.5, 'EUR_TO_USD': 1.08}
 
 RATES = get_tcmb_rates()
 
-def convert_any_to_usd(value):
+# --- GELİŞMİŞ FİYAT TEMİZLEME (0,0245 FIX) ---
+def clean_and_convert_to_usd(value):
     if pd.isna(value) or str(value).strip() == "": return None
     
-    # Metni temizle ve para birimini yakala
-    v_str = str(value).upper().replace(" ", "").replace("TL", "TRY")
-    currency = "TRY"
-    if "€" in v_str or "EUR" in v_str: currency = "EUR"
-    elif "$" in v_str or "USD" in v_str: currency = "USD"
+    text = str(value).upper().replace(" ", "").replace("TL", "TRY")
     
-    # Sadece rakam, virgül ve noktayı tut
-    v = re.sub(r'[^0-9,.]', '', v_str)
+    # Para birimi tespiti
+    unit = "TRY"
+    if "€" in text or "EUR" in text: unit = "EUR"
+    elif "$" in text or "USD" in text: unit = "USD"
     
-    # --- ONDALIK AYIRAÇ DÜZELTME (KRİTİK) ---
-    if ',' in v and '.' in v:
-        # Örn: 1.250,50 -> Nokta silinir, virgül noktaya döner
-        v = v.replace('.', '').replace(',', '.')
-    elif ',' in v:
-        # Örn: 0,0245 -> Virgül noktaya döner
-        v = v.replace(',', '.')
+    # Rakam dışı her şeyi ayıkla (sadece rakam, nokta ve virgül kalsın)
+    clean_val = re.sub(r'[^0-9,.]', '', text)
+    
+    # TR Formatı (0,0245 veya 1.250,50) -> Standart (0.0245 veya 1250.50)
+    if ',' in clean_val and '.' in clean_val:
+        clean_val = clean_val.replace('.', '').replace(',', '.')
+    elif ',' in clean_val:
+        clean_val = clean_val.replace(',', '.')
     
     try:
-        num = float(v)
-        # Hassas çarpım (6 hane)
-        if currency == "EUR": return round(num * RATES['EUR_TO_USD'], 6)
-        if currency == "TRY": return round(num * RATES['TRY_TO_USD'], 6)
+        num = float(clean_val)
+        if unit == "EUR": return round(num * RATES['EUR_TO_USD'], 6)
+        if unit == "TRY": return round(num * RATES['TRY_TO_USD'], 6)
         return round(num, 6)
     except:
         return None
 
-# --- DİĞER YARDIMCI FONKSİYONLAR ---
-PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n', 'vendor material']
-PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'resale', 'net']
+# --- SÜTUN BULUCU VE VERİ YÜKLEME ---
+PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n']
+PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'net']
 QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
 
-def aggressive_clean(text):
-    if pd.isna(text) or text == "": return ""
-    return re.sub(r'[^A-Z0-9]', '', str(text).upper().strip())
-
-def find_best_column(columns, priority_list):
-    for kw in priority_list:
-        for col in columns:
-            if kw in str(col).lower(): return col
+def find_col(cols, priority):
+    for p in priority:
+        for c in cols:
+            if p in str(c).lower(): return c
     return None
 
 def smart_load(file):
@@ -80,7 +78,7 @@ def smart_load(file):
         if ext in ['.xlsx', '.xls']:
             df = pd.read_excel(file, header=None)
             for i, row in df.head(30).iterrows():
-                if any(kw in str(row.values).lower() for kw in PN_PRIORITY):
+                if any(p in str(row.values).lower() for p in PN_PRIORITY):
                     return pd.read_excel(file, header=i)
             return pd.read_excel(file)
         elif ext == '.pdf':
@@ -90,69 +88,69 @@ def smart_load(file):
                     table = page.extract_table()
                     if table: all_rows.extend(table)
             if all_rows:
-                df_pdf = pd.DataFrame(all_rows)
-                df_pdf.columns = df_pdf.iloc[0]
-                return df_pdf.iloc[1:].reset_index(drop=True)
+                df_p = pd.DataFrame(all_rows)
+                df_p.columns = df_p.iloc[0]
+                return df_p.iloc[1:].reset_index(drop=True)
     except: return None
+    return None
 
-# --- ARAYÜZ VE ANALİZ ---
-st.title("📊 Profesyonel BOM Robotu v5.6")
+# --- ANA PROGRAM ---
+st.title("🚀 Akıllı BOM Karşılaştırma (v5.7 Stable)")
 
-master_file = st.file_uploader("1. Master BOM Listesi", type=['xlsx', 'xls'])
-supplier_files = st.file_uploader("2. Tedarikçi Teklifleri", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
+m_file = st.file_uploader("1. Master BOM (Excel)", type=['xlsx', 'xls'])
+s_files = st.file_uploader("2. Tedarikçi Teklifleri (Toplu)", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
 
-if master_file and supplier_files:
-    df_master = smart_load(master_file)
-    if df_master is not None:
-        m_pn_col = find_best_column(df_master.columns, PN_PRIORITY)
-        m_qty_col = find_best_column(df_master.columns, QTY_PRIORITY)
+if m_file and s_files:
+    df_m = smart_load(m_file)
+    if df_m is not None:
+        pn_col = find_col(df_m.columns, PN_PRIORITY)
+        qty_col = find_col(df_m.columns, QTY_PRIORITY)
         
-        if m_pn_col:
-            df_master['MATCH_KEY'] = df_master[m_pn_col].apply(aggressive_clean)
-            final_df = df_master.copy()
-            usd_cols = []
+        if pn_col:
+            df_m['MATCH_KEY'] = df_m[pn_col].apply(lambda x: re.sub(r'[^A-Z0-9]', '', str(x).upper().strip()) if pd.notna(x) else "")
+            report_df = df_m.copy()
+            supplier_cols = []
 
-            for s_file in supplier_files:
-                df_sup = smart_load(s_file)
-                if df_sup is not None:
-                    s_pn = find_best_column(df_sup.columns, PN_PRIORITY)
-                    s_pr = find_best_column(df_sup.columns, PRICE_PRIORITY)
+            for f in s_files:
+                df_s = smart_load(f)
+                if df_s is not None:
+                    s_pn = find_col(df_s.columns, PN_PRIORITY)
+                    s_pr = find_col(df_s.columns, PRICE_PRIORITY)
                     if s_pn and s_pr:
-                        s_name = os.path.splitext(s_file.name)[0][:15]
-                        u_col = f"Fiyat_{s_name} ($)"
-                        temp_sup = df_sup[[s_pn, s_pr]].copy()
-                        temp_sup['MATCH_KEY'] = temp_sup[s_pn].apply(aggressive_clean)
-                        temp_sup[u_col] = temp_sup[s_pr].apply(convert_any_to_usd)
-                        temp_sup = temp_sup.dropna(subset=[u_col]).drop_duplicates('MATCH_KEY')
-                        final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', u_col]], on='MATCH_KEY', how='left')
-                        usd_cols.append(u_col)
+                        s_name = os.path.splitext(f.name)[0][:15]
+                        col_name = f"{s_name} ($)"
+                        
+                        temp_s = df_s[[s_pn, s_pr]].copy()
+                        temp_s['MATCH_KEY'] = temp_s[s_pn].apply(lambda x: re.sub(r'[^A-Z0-9]', '', str(x).upper().strip()) if pd.notna(x) else "")
+                        temp_s[col_name] = temp_s[s_pr].apply(clean_and_convert_to_usd)
+                        
+                        temp_s = temp_s.dropna(subset=[col_name]).drop_duplicates('MATCH_KEY')
+                        report_df = pd.merge(report_df, temp_s[['MATCH_KEY', col_name]], on='MATCH_KEY', how='left')
+                        supplier_cols.append(col_name)
 
-            if usd_cols:
-                # --- ÇÖKMEYİ ENGELLEYEN HESAPLAMA MANTIĞI ---
-                final_df['En Düşük Birim ($)'] = final_df[usd_cols].min(axis=1)
+            if supplier_cols:
+                # En ucuz olanı bul ve çökme riskine karşı kontrol et
+                report_df['En Düşük ($)'] = report_df[supplier_cols].min(axis=1)
+                
+                def get_winner(row):
+                    valid = row[supplier_cols].dropna()
+                    if valid.empty: return "Teklif Yok"
+                    return valid.idxmin().replace(" ($)", "")
+                
+                report_df['Kazanan Tedarikçi'] = report_df.apply(get_winner, axis=1)
 
-                def get_winner_safe(row):
-                    valid_prices = row[usd_cols].dropna()
-                    if valid_prices.empty:
-                        return "Teklif Yok"
-                    # En küçük değerin sütun ismini bul ve temizle
-                    winner_col = valid_prices.idxmin()
-                    return str(winner_col).replace("Fiyat_", "").replace(" ($)", "")
+                if qty_col:
+                    report_df[qty_col] = pd.to_numeric(report_df[qty_col], errors='coerce').fillna(0)
+                    report_df['Toplam Maliyet ($)'] = (report_df['En Düşük ($)'] * report_df[qty_col]).round(4)
 
-                final_df['Kazanan'] = final_df.apply(get_winner_safe, axis=1)
+                final_view = report_df.drop(columns=['MATCH_KEY'])
+                st.dataframe(final_view, use_container_width=True)
 
-                if m_qty_col:
-                    final_df[m_qty_col] = pd.to_numeric(final_df[m_qty_col], errors='coerce').fillna(0)
-                    final_df['Toplam ($)'] = (final_df['En Düşük Birim ($)'] * final_df[m_qty_col]).round(4)
-
-                # Tablo ve İndirme
-                display_df = final_df.drop(columns=['MATCH_KEY'])
-                st.dataframe(display_df, use_container_width=True)
-
+                # Excel İndirme İşlemi
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    display_df.to_excel(writer, index=False, sheet_name='Analiz')
+                    final_view.to_excel(writer, index=False, sheet_name='Fiyat Analizi')
                 
-                st.download_button("📩 Excel Raporunu İndir", output.getvalue(), "Analiz_Raporu.xlsx")
+                st.download_button("📩 Excel Raporunu İndir", output.getvalue(), "BOM_Fiyat_Analizi.xlsx")
         else:
-            st.error("Master listede parça numarası sütunu bulunamadı.")
+            st.error("Master listede PN sütunu bulunamadı.")
