@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v6.9 - Tam Görünüm", layout="wide")
+st.set_page_config(page_title="BOM Robotu v7.0 - Tedarikçi Dağılımı", layout="wide")
 
 # --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
@@ -102,7 +102,7 @@ def smart_load(file):
     except: return None
 
 # --- 4. ANA AKIŞ ---
-st.title("📊 Profesyonel BOM Robotu v6.9")
+st.title("📊 Profesyonel BOM Robotu v7.0")
 
 master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'], key="m_up")
 supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin (Toplu)", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True, key="s_up")
@@ -116,7 +116,7 @@ if master_file and supplier_files:
         m_no = find_best_col(df_master.columns, NO_PRIORITY)
         
         if m_pn:
-            # Boş satırları filtrele
+            # Boş satırları filtrele (Önceki filtreleme mantığını koruyoruz)
             if m_no:
                 df_master = df_master.dropna(subset=[m_no, m_pn], how='all')
             else:
@@ -146,7 +146,7 @@ if master_file and supplier_files:
                         temp_sup = temp_sup.dropna(subset=[p_col]).drop_duplicates('MATCH_KEY')
                         final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', p_col]], on='MATCH_KEY', how='left')
                         price_cols.append(p_col)
-                        st.success(f"✔️ {s_file.name} işlendi.")
+                        st.success(f"✔️ {s_file.name} başarıyla işlendi.")
 
             if price_cols:
                 def get_row_results(row):
@@ -156,16 +156,27 @@ if master_file and supplier_files:
 
                 final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_row_results, axis=1)
                 
-                # --- ÖZET İSTATİSTİK PANELİ (GERİ GELDİ) ---
+                # --- ÖZET İSTATİSTİK PANELİ (GÜNCELLENDİ) ---
                 total_items = len(final_df)
                 found_items = final_df['En Düşük ($)'].notna().sum()
                 success_rate = (found_items / total_items) * 100 if total_items > 0 else 0
                 
                 st.divider()
+                st.subheader("📋 Genel Özet")
                 col1, col2, col3 = st.columns(3)
-                col1.metric("Toplam Malzeme", total_items)
-                col2.metric("Bulunan Teklif", found_items)
+                col1.metric("Toplam Malzeme", f"{total_items} Kalem")
+                col2.metric("Teklif Bulunan", f"{found_items} Kalem")
                 col3.metric("Başarı Oranı", f"%{success_rate:.1f}")
+                
+                # --- YENİ: TEDARİKÇİ DAĞILIMI (Firma bazlı sayılar) ---
+                win_counts = final_df[final_df['Kazanan'] != "Yok"]['Kazanan'].value_counts()
+                if not win_counts.empty:
+                    st.write("---")
+                    st.write("**Hangi Firmadan Kaç Malzeme Seçildi?**")
+                    # Tedarikçi sayısı kadar kolon oluştur
+                    sub_cols = st.columns(len(win_counts))
+                    for i, (winner, count) in enumerate(win_counts.items()):
+                        sub_cols[i].metric(winner, f"{count} Kalem")
                 st.divider()
 
                 if m_qty:
@@ -173,7 +184,6 @@ if master_file and supplier_files:
                     final_df['Toplam Maliyet ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty]).round(4)
 
                 st.subheader("🏁 Karşılaştırma Sonuçları")
-                # Tabloda 4 basamak gösterimi
                 st.dataframe(final_df.drop(columns=['MATCH_KEY']).style.format(precision=4, na_rep="-"), use_container_width=True)
                 
                 out = io.BytesIO()
