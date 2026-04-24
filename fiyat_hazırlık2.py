@@ -7,150 +7,166 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="BOM Robotu v5.7 - Kararlı Sürüm", layout="wide")
+st.set_page_config(page_title="BOM Robotu v5.8 - Hassas Kur Fix", layout="wide")
 
-# --- TCMB KUR SERVİSİ ---
+# --- 1. TCMB KUR SERVİSİ (Hatasız USD ve EUR çekimi) ---
 @st.cache_data(ttl=3600)
-def get_tcmb_rates():
+def get_live_rates():
     try:
+        # TCMB'den güncel kurları çek
         response = requests.get("https://www.tcmb.gov.tr/kurlar/today.xml", timeout=10)
         root = ET.fromstring(response.content)
-        rates = {'USD': 1.0, 'TRY': 1.0, 'EUR': 1.0}
+        
+        rates = {}
         for currency in root.findall('Currency'):
             code = currency.get('CurrencyCode')
             if code in ['USD', 'EUR']:
-                val = currency.find('ForexSelling').text
-                if val: rates[code] = float(val)
+                # ForexSelling (Döviz Satış) fiyatını alıyoruz
+                rates[code] = float(currency.find('ForexSelling').text)
         
-        u_rate = rates.get('USD', 32.5) 
+        # Dönüşüm katsayılarını hesapla (Hedefimiz her zaman USD)
+        # Arrow 0,0245 EUR verdiğinde: (0,0245 * EUR_Kuru) / USD_Kuru = USD Karşılığı
+        usd_val = rates['USD']
+        eur_val = rates['EUR']
+        
         return {
-            'TRY_TO_USD': 1 / u_rate,
-            'EUR_TO_USD': rates['EUR'] / u_rate
+            'EUR_TO_USD': eur_val / usd_val,
+            'TRY_TO_USD': 1 / usd_val,
+            'RAW_USD': usd_val,
+            'RAW_EUR': eur_val
         }
-    except:
-        return {'TRY_TO_USD': 1/32.5, 'EUR_TO_USD': 1.08}
+    except Exception as e:
+        st.error(f"Kur çekme hatası: {e}. Sabit kurlar uygulanıyor.")
+        return {'EUR_TO_USD': 1.08, 'TRY_TO_USD': 1/32.5}
 
-RATES = get_tcmb_rates()
+# Kurları bir kez çek ve değişkene ata
+LIVE_RATES = get_live_rates()
 
-# --- GELİŞMİŞ FİYAT TEMİZLEME (0,0245 FIX) ---
-def clean_and_convert_to_usd(value):
-    if pd.isna(value) or str(value).strip() == "": return None
+# --- 2. HASSAS FİYAT TEMİZLEME FONKSİYONU ---
+def parse_price_to_usd(raw_value):
+    if pd.isna(raw_value) or str(raw_value).strip() == "":
+        return None
     
-    text = str(value).upper().replace(" ", "").replace("TL", "TRY")
+    val_str = str(raw_value).upper().replace(" ", "")
     
-    # Para birimi tespiti
-    unit = "TRY"
-    if "€" in text or "EUR" in text: unit = "EUR"
-    elif "$" in text or "USD" in text: unit = "USD"
+    # Birim Tespiti
+    currency_unit = "TRY" # Varsayılan
+    if "€" in val_str or "EUR" in val_str: currency_unit = "EUR"
+    elif "$" in val_str or "USD" in val_str: currency_unit = "USD"
     
-    # Rakam dışı her şeyi ayıkla (sadece rakam, nokta ve virgül kalsın)
-    clean_val = re.sub(r'[^0-9,.]', '', text)
+    # Sadece rakam, nokta ve virgülü bırak
+    # Örn: "0,0245 €" -> "0,0245"
+    clean_str = re.sub(r'[^0-9,.]', '', val_str)
     
-    # TR Formatı (0,0245 veya 1.250,50) -> Standart (0.0245 veya 1250.50)
-    if ',' in clean_val and '.' in clean_val:
-        clean_val = clean_val.replace('.', '').replace(',', '.')
-    elif ',' in clean_val:
-        clean_val = clean_val.replace(',', '.')
+    # Format Düzeltme: Arrow formatı (0,0245) -> Python formatı (0.0245)
+    # Eğer hem nokta hem virgül varsa (1.250,50), noktayı sil virgülü noktaya çevir.
+    if ',' in clean_str and '.' in clean_str:
+        clean_str = clean_str.replace('.', '').replace(',', '.')
+    elif ',' in clean_str:
+        clean_str = clean_str.replace(',', '.')
     
     try:
-        num = float(clean_val)
-        if unit == "EUR": return round(num * RATES['EUR_TO_USD'], 6)
-        if unit == "TRY": return round(num * RATES['TRY_TO_USD'], 6)
-        return round(num, 6)
+        numeric_val = float(clean_str)
+        # Hassas Kur Çarpımı
+        if currency_unit == "EUR":
+            return numeric_val * LIVE_RATES['EUR_TO_USD']
+        elif currency_unit == "TRY":
+            return numeric_val * LIVE_RATES['TRY_TO_USD']
+        else: # Zaten USD
+            return numeric_val
     except:
         return None
 
-# --- SÜTUN BULUCU VE VERİ YÜKLEME ---
-PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n']
-PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'net']
-QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
+# --- 3. DİĞER YARDIMCI FONKSİYONLAR ---
+PN_PRIO = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n']
+PR_PRIO = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'net']
+QTY_PRIO = ['qty', 'adet', 'miktar', 'quantity']
 
-def find_col(cols, priority):
-    for p in priority:
-        for c in cols:
+def find_column(available_cols, priority_list):
+    for p in priority_list:
+        for c in available_cols:
             if p in str(c).lower(): return c
     return None
 
-def smart_load(file):
+def smart_read(file):
     ext = os.path.splitext(file.name)[1].lower()
-    try:
-        if ext in ['.xlsx', '.xls']:
-            df = pd.read_excel(file, header=None)
-            for i, row in df.head(30).iterrows():
-                if any(p in str(row.values).lower() for p in PN_PRIORITY):
-                    return pd.read_excel(file, header=i)
-            return pd.read_excel(file)
-        elif ext == '.pdf':
-            all_rows = []
-            with pdfplumber.open(file) as pdf:
-                for page in pdf.pages:
-                    table = page.extract_table()
-                    if table: all_rows.extend(table)
-            if all_rows:
-                df_p = pd.DataFrame(all_rows)
-                df_p.columns = df_p.iloc[0]
-                return df_p.iloc[1:].reset_index(drop=True)
-    except: return None
+    if ext in ['.xlsx', '.xls']:
+        df = pd.read_excel(file, header=None)
+        for i, row in df.head(30).iterrows():
+            if any(p in str(row.values).lower() for p in PN_PRIO):
+                return pd.read_excel(file, header=i)
+        return pd.read_excel(file)
+    elif ext == '.pdf':
+        with pdfplumber.open(file) as pdf:
+            rows = []
+            for page in pdf.pages:
+                table = page.extract_table()
+                if table: rows.extend(table)
+            if rows:
+                pdf_df = pd.DataFrame(rows)
+                pdf_df.columns = pdf_df.iloc[0]
+                return pdf_df.iloc[1:].reset_index(drop=True)
     return None
 
-# --- ANA PROGRAM ---
-st.title("🚀 Akıllı BOM Karşılaştırma (v5.7 Stable)")
+# --- 4. ANA ARAYÜZ VE ANALİZ ---
+st.title("📊 Hassas BOM Karşılaştırma v5.8")
+st.sidebar.markdown(f"**Güncel Kurlar (TCMB)**\n\n1 EUR = **{LIVE_RATES['EUR_TO_USD']:.6f} $**\n1 TL = **{LIVE_RATES['TRY_TO_USD']:.6f} $**")
 
-m_file = st.file_uploader("1. Master BOM (Excel)", type=['xlsx', 'xls'])
-s_files = st.file_uploader("2. Tedarikçi Teklifleri (Toplu)", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
+master_file = st.file_uploader("1. Master Liste", type=['xlsx', 'xls'])
+teklif_files = st.file_uploader("2. Teklifler", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
 
-if m_file and s_files:
-    df_m = smart_load(m_file)
-    if df_m is not None:
-        pn_col = find_col(df_m.columns, PN_PRIORITY)
-        qty_col = find_col(df_m.columns, QTY_PRIORITY)
+if master_file and teklif_files:
+    m_df = smart_read(master_file)
+    if m_df is not None:
+        pn_col = find_column(m_df.columns, PN_PRIO)
+        qty_col = find_column(m_df.columns, QTY_PRIO)
         
         if pn_col:
-            df_m['MATCH_KEY'] = df_m[pn_col].apply(lambda x: re.sub(r'[^A-Z0-9]', '', str(x).upper().strip()) if pd.notna(x) else "")
-            report_df = df_m.copy()
-            supplier_cols = []
+            # Eşleştirme anahtarını oluştur
+            m_df['M_KEY'] = m_df[pn_col].apply(lambda x: re.sub(r'[^A-Z0-9]', '', str(x).upper()) if pd.notna(x) else "")
+            final_table = m_df.copy()
+            active_suppliers = []
 
-            for f in s_files:
-                df_s = smart_load(f)
-                if df_s is not None:
-                    s_pn = find_col(df_s.columns, PN_PRIORITY)
-                    s_pr = find_col(df_s.columns, PRICE_PRIORITY)
-                    if s_pn and s_pr:
-                        s_name = os.path.splitext(f.name)[0][:15]
-                        col_name = f"{s_name} ($)"
+            for t_file in teklif_files:
+                t_df = smart_read(t_file)
+                if t_df is not None:
+                    t_pn = find_column(t_df.columns, PN_PRIO)
+                    t_pr = find_column(t_df.columns, PR_PRIO)
+                    
+                    if t_pn and t_pr:
+                        s_name = os.path.splitext(t_file.name)[0][:15]
+                        s_col = f"{s_name} ($)"
                         
-                        temp_s = df_s[[s_pn, s_pr]].copy()
-                        temp_s['MATCH_KEY'] = temp_s[s_pn].apply(lambda x: re.sub(r'[^A-Z0-9]', '', str(x).upper().strip()) if pd.notna(x) else "")
-                        temp_s[col_name] = temp_s[s_pr].apply(clean_and_convert_to_usd)
+                        # Teklif verisini işle
+                        sub_df = t_df[[t_pn, t_pr]].copy()
+                        sub_df['M_KEY'] = sub_df[t_pn].apply(lambda x: re.sub(r'[^A-Z0-9]', '', str(x).upper()) if pd.notna(x) else "")
+                        sub_df[s_col] = sub_df[t_pr].apply(parse_price_to_usd)
                         
-                        temp_s = temp_s.dropna(subset=[col_name]).drop_duplicates('MATCH_KEY')
-                        report_df = pd.merge(report_df, temp_s[['MATCH_KEY', col_name]], on='MATCH_KEY', how='left')
-                        supplier_cols.append(col_name)
+                        # Temizle ve birleştir
+                        sub_df = sub_df.dropna(subset=[s_col]).drop_duplicates('M_KEY')
+                        final_table = pd.merge(final_table, sub_df[['M_KEY', s_col]], on='M_KEY', how='left')
+                        active_suppliers.append(s_col)
 
-            if supplier_cols:
-                # En ucuz olanı bul ve çökme riskine karşı kontrol et
-                report_df['En Düşük ($)'] = report_df[supplier_cols].min(axis=1)
+            if active_suppliers:
+                # Sonuç Hesaplamaları
+                final_table['En Düşük ($)'] = final_table[active_suppliers].min(axis=1)
                 
-                def get_winner(row):
-                    valid = row[supplier_cols].dropna()
-                    if valid.empty: return "Teklif Yok"
-                    return valid.idxmin().replace(" ($)", "")
+                def identify_winner(row):
+                    prices = row[active_suppliers].dropna()
+                    if prices.empty: return "Teklif Yok"
+                    return prices.idxmin().replace(" ($)", "")
                 
-                report_df['Kazanan Tedarikçi'] = report_df.apply(get_winner, axis=1)
+                final_table['Kazanan'] = final_table.apply(identify_winner, axis=1)
 
                 if qty_col:
-                    report_df[qty_col] = pd.to_numeric(report_df[qty_col], errors='coerce').fillna(0)
-                    report_df['Toplam Maliyet ($)'] = (report_df['En Düşük ($)'] * report_df[qty_col]).round(4)
+                    final_table[qty_col] = pd.to_numeric(final_table[qty_col], errors='coerce').fillna(0)
+                    final_table['Toplam ($)'] = (final_table['En Düşük ($)'] * final_table[qty_col]).round(4)
 
-                final_view = report_df.drop(columns=['MATCH_KEY'])
-                st.dataframe(final_view, use_container_width=True)
+                # Tablo ve Çıktı
+                view = final_table.drop(columns=['M_KEY'])
+                st.dataframe(view, use_container_width=True)
 
-                # Excel İndirme İşlemi
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    final_view.to_excel(writer, index=False, sheet_name='Fiyat Analizi')
-                
-                st.download_button("📩 Excel Raporunu İndir", output.getvalue(), "BOM_Fiyat_Analizi.xlsx")
-        else:
-            st.error("Master listede PN sütunu bulunamadı.")
+                    view.to_excel(writer, index=False, sheet_name='Analiz')
+                st.download_button("📩 Excel Raporunu İndir", output.getvalue(), "Fiyat_Analiz.xlsx")
