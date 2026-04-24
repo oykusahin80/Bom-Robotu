@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v7.2 - Yan Panel Özetli", layout="wide")
+st.set_page_config(page_title="BOM Robotu v7.3 - Stok Kontrollü", layout="wide")
 
 # --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
@@ -22,10 +22,8 @@ def get_live_rates():
                 val = curr.find('ForexSelling').text
                 if val: rates[code] = float(val)
         return {
-            'USD_TRY': rates['USD'],
-            'EUR_TRY': rates['EUR'],
-            'EUR_USD': rates['EUR'] / rates['USD'],
-            'TRY_USD': 1 / rates['USD']
+            'USD_TRY': rates['USD'], 'EUR_TRY': rates['EUR'],
+            'EUR_USD': rates['EUR'] / rates['USD'], 'TRY_USD': 1 / rates['USD']
         }
     except:
         return {'USD_TRY': 33.0, 'EUR_TRY': 36.0, 'EUR_USD': 1.09, 'TRY_USD': 1/33.0}
@@ -50,21 +48,28 @@ def parse_to_usd(val, is_arrow=False):
     c = re.sub(r'[^0-9,.]', '', v)
     if ',' in c and '.' in c: c = c.replace('.', '').replace(',', '.')
     elif ',' in c: c = c.replace(',', '.')
-    
     try:
         n = float(c)
-        if is_arrow or "EUR" in v or "€" in v:
-            return round(n * L_RATES['EUR_USD'], 4)
-        if "TL" in v or "TRY" in v:
-            return round(n * L_RATES['TRY_USD'], 4)
+        if is_arrow or "EUR" in v or "€" in v: return round(n * L_RATES['EUR_USD'], 4)
+        if "TL" in v or "TRY" in v: return round(n * L_RATES['TRY_USD'], 4)
         return round(n, 4)
     except: return None
 
-# --- 3. ESNEK SÜTUN TANIMA VE YÜKLEME ---
-PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n', 'vendor material', 'mfr part']
-PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'resale', 'net', 'amount']
+def clean_stock(val):
+    """Stok verisini sayıya çevirir, yoksa 999999 (Sınırsız) varsayar"""
+    if pd.isna(val) or str(val).strip() == "": return 999999
+    s = str(val).upper()
+    if any(x in s for x in ['YOK', 'OUT', 'NO', 'ZERO']): return 0
+    c = re.sub(r'[^0-9]', '', s)
+    try: return int(c) if c else 999999
+    except: return 999999
+
+# --- 3. ESNEK SÜTUN TANIMA ---
+PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n', 'mfr part']
+PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'resale', 'net']
 QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
 NO_PRIORITY = ['no', 'sıra no', 'item no', 'id']
+STOCK_PRIORITY = ['stock', 'stok', 'qty available', 'on hand', 'mevcut', 'availability']
 
 def find_best_col(columns, priority_list):
     for kw in priority_list:
@@ -92,35 +97,30 @@ def smart_load(file):
                     table = page.extract_table()
                     if table: all_rows.extend(table)
             if all_rows:
-                df_pdf = pd.DataFrame(all_rows)
-                for i, row in df_pdf.head(20).iterrows():
+                df_p = pd.DataFrame(all_rows)
+                for i, row in df_p.head(20).iterrows():
                     if any(kw in " ".join(map(str, row.values)).lower() for kw in PN_PRIORITY):
-                        df_pdf.columns = df_pdf.iloc[i]
-                        return df_pdf.iloc[i+1:].reset_index(drop=True)
-                return df_pdf
+                        df_p.columns = df_p.iloc[i]
+                        return df_p.iloc[i+1:].reset_index(drop=True)
+                return df_p
     except: return None
 
 # --- 4. ANA AKIŞ ---
-st.title("📊 Profesyonel BOM Robotu v7.2")
+st.title("📊 Profesyonel BOM Robotu v7.3 (Stok Kontrollü)")
 
 master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'], key="m_up")
 supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin (Toplu)", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True, key="s_up")
 
 if master_file and supplier_files:
     df_master = smart_load(master_file)
-    
     if df_master is not None:
         m_pn = find_best_col(df_master.columns, PN_PRIORITY)
         m_qty = find_best_col(df_master.columns, QTY_PRIORITY)
         m_no = find_best_col(df_master.columns, NO_PRIORITY)
         
         if m_pn:
-            # Boş satırları filtrele
-            if m_no:
-                df_master = df_master.dropna(subset=[m_no, m_pn], how='all')
-            else:
-                df_master = df_master.dropna(subset=[m_pn])
-            
+            if m_no: df_master = df_master.dropna(subset=[m_no, m_pn], how='all')
+            else: df_master = df_master.dropna(subset=[m_pn])
             df_master = df_master[df_master[m_pn].apply(lambda x: str(x).strip() != "" and pd.notna(x))]
             df_master['MATCH_KEY'] = df_master[m_pn].apply(aggressive_clean)
             
@@ -132,6 +132,7 @@ if master_file and supplier_files:
                 if df_sup is not None:
                     s_pn = find_best_col(df_sup.columns, PN_PRIORITY)
                     s_pr = find_best_col(df_sup.columns, PRICE_PRIORITY)
+                    s_st = find_best_col(df_sup.columns, STOCK_PRIORITY) # Stok sütunu arama
                     
                     if s_pn and s_pr:
                         s_name = os.path.splitext(s_file.name)[0][:15]
@@ -140,7 +141,16 @@ if master_file and supplier_files:
                         
                         temp_sup = df_sup.copy()
                         temp_sup['MATCH_KEY'] = temp_sup[s_pn].apply(aggressive_clean)
-                        temp_sup[p_col] = temp_sup[s_pr].apply(lambda x: parse_to_usd(x, is_arrow))
+                        
+                        # Fiyat ve Stok işleme
+                        temp_sup['RAW_PRICE'] = temp_sup[s_pr].apply(lambda x: parse_to_usd(x, is_arrow))
+                        if s_st:
+                            temp_sup['STOCK_VAL'] = temp_sup[s_st].apply(clean_stock)
+                        else:
+                            temp_sup['STOCK_VAL'] = 999999 # Bilgi yoksa var say
+                            
+                        # KRİTİK: Stok 0 ise fiyatı iptal et
+                        temp_sup[p_col] = temp_sup.apply(lambda r: r['RAW_PRICE'] if r['STOCK_VAL'] > 0 else None, axis=1)
                         
                         temp_sup = temp_sup.dropna(subset=[p_col]).drop_duplicates('MATCH_KEY')
                         final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', p_col]], on='MATCH_KEY', how='left')
@@ -155,20 +165,19 @@ if master_file and supplier_files:
 
                 final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_row_results, axis=1)
                 
-                # --- YAN PANEL ANALİZ ÖZETİ (İSTEDİĞİNİZ YER) ---
+                # SIDEBAR ÖZETİ
                 total_items = len(final_df)
                 found_items = final_df['En Düşük ($)'].notna().sum()
                 success_rate = (found_items / total_items) * 100 if total_items > 0 else 0
-                
                 st.sidebar.title("📊 Analiz Özeti")
                 st.sidebar.info(f"**Toplam:** {total_items} Kalem")
-                st.sidebar.success(f"**Bulunan:** {found_items} Kalem")
+                st.sidebar.success(f"**Stokta Bulunan:** {found_items} Kalem")
                 st.sidebar.warning(f"**Başarı:** %{success_rate:.1f}")
                 
                 win_counts = final_df[final_df['Kazanan'] != "Yok"]['Kazanan'].value_counts()
                 if not win_counts.empty:
                     st.sidebar.divider()
-                    st.sidebar.write("**Tedarikçi Dağılımı:**")
+                    st.sidebar.write("**Tedarikçi Dağılımı (Stoklu):**")
                     for winner, count in win_counts.items():
                         st.sidebar.write(f"🔹 {winner}: **{count}**")
 
@@ -176,10 +185,10 @@ if master_file and supplier_files:
                     final_df[m_qty] = pd.to_numeric(final_df[m_qty], errors='coerce').fillna(0)
                     final_df['Toplam Maliyet ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty]).round(4)
 
-                st.subheader("🏁 Karşılaştırma Sonuçları")
+                st.subheader("🏁 Karşılaştırma Sonuçları (Sadece Stoklu Teklifler)")
                 st.dataframe(final_df.drop(columns=['MATCH_KEY']).style.format(precision=4, na_rep="-"), use_container_width=True)
                 
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     final_df.drop(columns=['MATCH_KEY']).to_excel(writer, index=False)
-                st.download_button("📩 Raporu İndir (Excel)", out.getvalue(), "BOM_Analiz_Raporu.xlsx")
+                st.download_button("📩 Raporu İndir", out.getvalue(), "BOM_Stoklu_Analiz.xlsx")
