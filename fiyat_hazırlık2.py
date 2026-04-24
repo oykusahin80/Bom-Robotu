@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v6.8 - Dinamik Yükleme", layout="wide")
+st.set_page_config(page_title="BOM Robotu v6.9 - Tam Görünüm", layout="wide")
 
 # --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
@@ -38,6 +38,7 @@ st.sidebar.write(f"**USD / TL:** {L_RATES['USD_TRY']:.4f}")
 st.sidebar.write(f"**EUR / TL:** {L_RATES['EUR_TRY']:.4f}")
 st.sidebar.write(f"**EUR / USD:** {L_RATES['EUR_USD']:.4f}")
 st.sidebar.divider()
+st.sidebar.caption("Kurlar saatlik olarak güncellenir.")
 
 # --- 2. TEMİZLEME VE HESAPLAMA ---
 def aggressive_clean(text):
@@ -74,7 +75,6 @@ def find_best_col(columns, priority_list):
 
 def smart_load(file):
     if file is None: return None
-    # Dosya her okunduğunda başına dönüyoruz (yeni yükleme çakışmasını önler)
     file.seek(0)
     ext = os.path.splitext(file.name)[1].lower()
     try:
@@ -99,21 +99,15 @@ def smart_load(file):
                         df_pdf.columns = df_pdf.iloc[i]
                         return df_pdf.iloc[i+1:].reset_index(drop=True)
                 return df_pdf
-    except Exception as e:
-        st.error(f"Dosya okuma hatası ({file.name}): {e}")
-    return None
+    except: return None
 
 # --- 4. ANA AKIŞ ---
-st.title("📊 Profesyonel BOM Robotu v6.8")
+st.title("📊 Profesyonel BOM Robotu v6.9")
 
-# Master BOM tekli yükleme
-master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'], key="master_uploader")
-
-# Teklifler çoklu yükleme (key ekleyerek state yönetimini güçlendirdik)
-supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin (Toplu)", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True, key="supplier_uploader")
+master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'], key="m_up")
+supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin (Toplu)", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True, key="s_up")
 
 if master_file and supplier_files:
-    # Her dosya değiştiğinde yeniden yüklemeyi tetikleyen ana döngü
     df_master = smart_load(master_file)
     
     if df_master is not None:
@@ -122,7 +116,7 @@ if master_file and supplier_files:
         m_no = find_best_col(df_master.columns, NO_PRIORITY)
         
         if m_pn:
-            # Filtreleme
+            # Boş satırları filtrele
             if m_no:
                 df_master = df_master.dropna(subset=[m_no, m_pn], how='all')
             else:
@@ -134,7 +128,6 @@ if master_file and supplier_files:
             final_df = df_master.copy()
             price_cols = []
 
-            # Yüklenen her bir tedarikçi dosyası için işle
             for s_file in supplier_files:
                 df_sup = smart_load(s_file)
                 if df_sup is not None:
@@ -153,8 +146,7 @@ if master_file and supplier_files:
                         temp_sup = temp_sup.dropna(subset=[p_col]).drop_duplicates('MATCH_KEY')
                         final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', p_col]], on='MATCH_KEY', how='left')
                         price_cols.append(p_col)
-                    else:
-                        st.warning(f"⚠️ {s_file.name} içinde PN veya Fiyat bulunamadı.")
+                        st.success(f"✔️ {s_file.name} işlendi.")
 
             if price_cols:
                 def get_row_results(row):
@@ -164,18 +156,27 @@ if master_file and supplier_files:
 
                 final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_row_results, axis=1)
                 
-                # Özet Panel
+                # --- ÖZET İSTATİSTİK PANELİ (GERİ GELDİ) ---
                 total_items = len(final_df)
                 found_items = final_df['En Düşük ($)'].notna().sum()
-                st.info(f"📁 Toplam {len(supplier_files)} dosya işlendi. {total_items} kalemden {found_items} tanesine fiyat bulundu.")
+                success_rate = (found_items / total_items) * 100 if total_items > 0 else 0
+                
+                st.divider()
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Toplam Malzeme", total_items)
+                col2.metric("Bulunan Teklif", found_items)
+                col3.metric("Başarı Oranı", f"%{success_rate:.1f}")
+                st.divider()
 
                 if m_qty:
                     final_df[m_qty] = pd.to_numeric(final_df[m_qty], errors='coerce').fillna(0)
                     final_df['Toplam Maliyet ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty]).round(4)
 
+                st.subheader("🏁 Karşılaştırma Sonuçları")
+                # Tabloda 4 basamak gösterimi
                 st.dataframe(final_df.drop(columns=['MATCH_KEY']).style.format(precision=4, na_rep="-"), use_container_width=True)
                 
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     final_df.drop(columns=['MATCH_KEY']).to_excel(writer, index=False)
-                st.download_button("📩 Güncel Raporu İndir", out.getvalue(), "BOM_Analiz_Raporu.xlsx")
+                st.download_button("📩 Güncel Excel Raporunu İndir", out.getvalue(), "BOM_Analiz_Raporu.xlsx")
