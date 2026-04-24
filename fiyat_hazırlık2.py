@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v6.6 - Tam Kapsamlı", layout="wide")
+st.set_page_config(page_title="BOM Robotu v6.7 - Akıllı Filtre", layout="wide")
 
 # --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
@@ -42,7 +42,7 @@ st.sidebar.caption("Kurlar saatlik olarak güncellenir.")
 
 # --- 2. TEMİZLEME VE HESAPLAMA ---
 def aggressive_clean(text):
-    if pd.isna(text) or text == "": return ""
+    if pd.isna(text) or str(text).strip() == "": return ""
     return re.sub(r'[^A-Z0-9]', '', str(text).upper().strip())
 
 def parse_to_usd(val, is_arrow=False):
@@ -55,21 +55,22 @@ def parse_to_usd(val, is_arrow=False):
     try:
         n = float(c)
         if is_arrow or "EUR" in v or "€" in v:
-            return round(n * L_RATES['EUR_USD'], 4) # 4 Basamak
+            return round(n * L_RATES['EUR_USD'], 4)
         if "TL" in v or "TRY" in v:
-            return round(n * L_RATES['TRY_USD'], 4) # 4 Basamak
+            return round(n * L_RATES['TRY_USD'], 4)
         return round(n, 4)
     except: return None
 
-# --- 3. ESNEK SÜTUN TANIMA ---
+# --- 3. ESNEK SÜTUN TANIMA VE YÜKLEME ---
 PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n', 'vendor material', 'mfr part']
 PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'resale', 'net', 'amount']
 QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
+NO_PRIORITY = ['no', 'sıra no', 'item no', 'id']
 
 def find_best_col(columns, priority_list):
     for kw in priority_list:
         for col in columns:
-            if kw in str(col).lower(): return col
+            if kw == str(col).lower().strip() or kw in str(col).lower(): return col
     return None
 
 def smart_load(file):
@@ -98,7 +99,7 @@ def smart_load(file):
     except: return None
 
 # --- 4. ANA AKIŞ ---
-st.title("📊 Profesyonel BOM Robotu v6.6")
+st.title("📊 Profesyonel BOM Robotu v6.7")
 
 master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'])
 supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
@@ -108,8 +109,25 @@ if master_file and supplier_files:
     if df_master is not None:
         m_pn = find_best_col(df_master.columns, PN_PRIORITY)
         m_qty = find_best_col(df_master.columns, QTY_PRIORITY)
+        m_no = find_best_col(df_master.columns, NO_PRIORITY)
         
+        # --- KRİTİK FİLTRELEME MANTIĞI ---
+        # Eğer 'NO' sütunu varsa ve boşsa VEYA Üretici Kodu boşsa o satırı atla
         if m_pn:
+            initial_count = len(df_master)
+            # Hem NO sütunu (eğer varsa) hem de PN sütunu üzerinden kontrol yapıyoruz
+            if m_no:
+                df_master = df_master.dropna(subset=[m_no, m_pn], how='all')
+            else:
+                df_master = df_master.dropna(subset=[m_pn])
+            
+            # Ek olarak temiz PN kontrolü (Boş stringleri de siler)
+            df_master = df_master[df_master[m_pn].apply(lambda x: str(x).strip() != "" and pd.notna(x))]
+            
+            cleaned_count = initial_count - len(df_master)
+            if cleaned_count > 0:
+                st.caption(f"ℹ️ {cleaned_count} adet boş veya geçersiz satır temizlendi.")
+
             df_master['MATCH_KEY'] = df_master[m_pn].apply(aggressive_clean)
             final_df = df_master.copy()
             price_cols = []
@@ -132,7 +150,7 @@ if master_file and supplier_files:
                         temp_sup = temp_sup.dropna(subset=[p_col]).drop_duplicates('MATCH_KEY')
                         final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', p_col]], on='MATCH_KEY', how='left')
                         price_cols.append(p_col)
-                        st.success(f"✔️ {s_file.name} başarıyla eklendi.")
+                        st.success(f"✔️ {s_file.name} eklendi.")
 
             if price_cols:
                 def get_row_results(row):
@@ -142,7 +160,7 @@ if master_file and supplier_files:
 
                 final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_row_results, axis=1)
                 
-                # --- ÖZET İSTATİSTİKLER ---
+                # İstatistikler
                 total_items = len(final_df)
                 found_items = final_df['En Düşük ($)'].notna().sum()
                 success_rate = (found_items / total_items) * 100 if total_items > 0 else 0
