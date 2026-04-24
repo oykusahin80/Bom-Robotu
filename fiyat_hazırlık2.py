@@ -7,11 +7,11 @@ import requests
 import xml.etree.ElementTree as ET
 import io
 
-st.set_page_config(page_title="BOM Robotu v6.4 - Final", layout="wide")
+st.set_page_config(page_title="BOM Robotu v6.6 - Tam Kapsamlı", layout="wide")
 
-# --- 1. TCMB KUR ÇEKİMİ (SADE VE NET) ---
+# --- 1. TCMB KUR SERVİSİ ---
 @st.cache_data(ttl=3600)
-def get_tcmb_rates():
+def get_live_rates():
     try:
         response = requests.get("https://www.tcmb.gov.tr/kurlar/today.xml", timeout=10)
         root = ET.fromstring(response.content)
@@ -21,13 +21,26 @@ def get_tcmb_rates():
             if code in ['USD', 'EUR']:
                 val = curr.find('ForexSelling').text
                 if val: rates[code] = float(val)
-        return {'EUR_USD': rates['EUR'] / rates['USD'], 'TRY_USD': 1 / rates['USD']}
+        return {
+            'USD_TRY': rates['USD'],
+            'EUR_TRY': rates['EUR'],
+            'EUR_USD': rates['EUR'] / rates['USD'],
+            'TRY_USD': 1 / rates['USD']
+        }
     except:
-        return {'EUR_USD': 1.09, 'TRY_USD': 1/33.0}
+        return {'USD_TRY': 33.0, 'EUR_TRY': 36.0, 'EUR_USD': 1.09, 'TRY_USD': 1/33.0}
 
-L_RATES = get_tcmb_rates()
+L_RATES = get_live_rates()
 
-# --- 2. ILK KODLARDAKİ ESNEK TEMİZLEME MANTIĞI ---
+# --- SIDEBAR (KUR BİLGİLERİ) ---
+st.sidebar.title("🏦 Güncel Kurlar (TCMB)")
+st.sidebar.write(f"**USD / TL:** {L_RATES['USD_TRY']:.4f}")
+st.sidebar.write(f"**EUR / TL:** {L_RATES['EUR_TRY']:.4f}")
+st.sidebar.write(f"**EUR / USD:** {L_RATES['EUR_USD']:.4f}")
+st.sidebar.divider()
+st.sidebar.caption("Kurlar saatlik olarak güncellenir.")
+
+# --- 2. TEMİZLEME VE HESAPLAMA ---
 def aggressive_clean(text):
     if pd.isna(text) or text == "": return ""
     return re.sub(r'[^A-Z0-9]', '', str(text).upper().strip())
@@ -35,23 +48,20 @@ def aggressive_clean(text):
 def parse_to_usd(val, is_arrow=False):
     if pd.isna(val) or str(val).strip() == "": return None
     v = str(val).upper().replace(" ", "")
-    
-    # Rakam ayıklama (v4.5'teki gibi ama 6 basamak hassasiyetle)
     c = re.sub(r'[^0-9,.]', '', v)
     if ',' in c and '.' in c: c = c.replace('.', '').replace(',', '.')
     elif ',' in c: c = c.replace(',', '.')
     
     try:
         n = float(c)
-        # Kur dönüşümü
-        if "EUR" in v or "€" in v or is_arrow: # Arrow ise direkt EUR/USD paritesi
-            return n * L_RATES['EUR_USD']
+        if is_arrow or "EUR" in v or "€" in v:
+            return round(n * L_RATES['EUR_USD'], 4) # 4 Basamak
         if "TL" in v or "TRY" in v:
-            return n * L_RATES['TRY_USD']
-        return n # Varsayılan USD
+            return round(n * L_RATES['TRY_USD'], 4) # 4 Basamak
+        return round(n, 4)
     except: return None
 
-# --- 3. ILK KODLARDAKİ GENİŞ SÜTUN TANIMA ---
+# --- 3. ESNEK SÜTUN TANIMA ---
 PN_PRIORITY = ['manufacturer part number', 'man code', 'üretici parça kodu', 'parça numarası', 'part number', 'pn', 'kod', 'model', 'p/n', 'vendor material', 'mfr part']
 PRICE_PRIORITY = ['unit price', 'birim fiyat', 'fiyat', 'price', 'tutar', 'resale', 'net', 'amount']
 QTY_PRIORITY = ['qty', 'adet', 'miktar', 'quantity']
@@ -67,7 +77,6 @@ def smart_load(file):
     try:
         if ext in ['.xlsx', '.xls']:
             df = pd.read_excel(file, header=None)
-            # İlk 50 satırda anahtar kelime ara (v4.5 mantığı)
             for i, row in df.head(50).iterrows():
                 row_str = " ".join(map(str, row.values)).lower()
                 if any(kw in row_str for kw in PN_PRIORITY):
@@ -88,11 +97,11 @@ def smart_load(file):
                 return df_pdf
     except: return None
 
-# --- 4. ARAYÜZ VE ANALİZ ---
-st.title("📊 Akıllı BOM Robotu v6.4 (Bütüncül Sürüm)")
+# --- 4. ANA AKIŞ ---
+st.title("📊 Profesyonel BOM Robotu v6.6")
 
-master_file = st.file_uploader("1. Master BOM (Excel)", type=['xlsx', 'xls'])
-supplier_files = st.file_uploader("2. Teklifler", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
+master_file = st.file_uploader("1. Master Listeyi Seçin", type=['xlsx', 'xls'])
+supplier_files = st.file_uploader("2. Teklif Dosyalarını Seçin", type=['xlsx', 'xls', 'pdf'], accept_multiple_files=True)
 
 if master_file and supplier_files:
     df_master = smart_load(master_file)
@@ -116,32 +125,41 @@ if master_file and supplier_files:
                         p_col = f"{s_name}_($)"
                         is_arrow = "ARROW" in s_file.name.upper()
                         
-                        temp_sup = df_sup[[s_pn, s_pr]].copy()
+                        temp_sup = df_sup.copy()
                         temp_sup['MATCH_KEY'] = temp_sup[s_pn].apply(aggressive_clean)
                         temp_sup[p_col] = temp_sup[s_pr].apply(lambda x: parse_to_usd(x, is_arrow))
                         
                         temp_sup = temp_sup.dropna(subset=[p_col]).drop_duplicates('MATCH_KEY')
                         final_df = pd.merge(final_df, temp_sup[['MATCH_KEY', p_col]], on='MATCH_KEY', how='left')
                         price_cols.append(p_col)
-                        st.info(f"✅ {s_file.name} eşleşti.")
+                        st.success(f"✔️ {s_file.name} başarıyla eklendi.")
 
             if price_cols:
-                # Kazanan ve En Düşük (Satır bazlı korumalı hesaplama)
-                def get_results(row):
+                def get_row_results(row):
                     valid = row[price_cols].dropna()
                     if valid.empty: return pd.Series([None, "Yok"], index=['Min', 'Win'])
-                    return pd.Series([valid.min(), valid.idxmin().replace("_($)", "")], index=['Min', 'Win'])
+                    return pd.Series([round(valid.min(), 4), valid.idxmin().replace("_($)", "")], index=['Min', 'Win'])
 
-                final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_results, axis=1)
+                final_df[['En Düşük ($)', 'Kazanan']] = final_df.apply(get_row_results, axis=1)
                 
+                # --- ÖZET İSTATİSTİKLER ---
+                total_items = len(final_df)
+                found_items = final_df['En Düşük ($)'].notna().sum()
+                success_rate = (found_items / total_items) * 100 if total_items > 0 else 0
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Toplam Kalem", total_items)
+                c2.metric("Teklif Bulunan", found_items)
+                c3.metric("Başarı Oranı", f"%{success_rate:.1f}")
+
                 if m_qty:
                     final_df[m_qty] = pd.to_numeric(final_df[m_qty], errors='coerce').fillna(0)
-                    final_df['Toplam ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty]).round(4)
+                    final_df['Toplam Maliyet ($)'] = (final_df['En Düşük ($)'] * final_df[m_qty]).round(4)
 
-                st.dataframe(final_df.drop(columns=['MATCH_KEY']))
+                st.subheader("🏁 Karşılaştırma Tablosu")
+                st.dataframe(final_df.drop(columns=['MATCH_KEY']).style.format(precision=4, na_rep="-"), use_container_width=True)
                 
-                # Gerçek Excel Çıktısı
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     final_df.drop(columns=['MATCH_KEY']).to_excel(writer, index=False)
-                st.download_button("📩 Excel Raporunu İndir", out.getvalue(), "BOM_Analiz.xlsx")
+                st.download_button("📩 Excel Raporunu İndir", out.getvalue(), "BOM_Analiz_Raporu.xlsx")
