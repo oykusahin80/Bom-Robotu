@@ -4,3 +4,4 @@ pdfplumber
 openpyxl
 requests
 plotly
+xlsxwriter
